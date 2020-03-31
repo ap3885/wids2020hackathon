@@ -1,0 +1,255 @@
+---
+title: "wids_last_FE"
+author: "Apoorva Srinivasan"
+date: "2/21/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(randomForest)
+library(e1071)
+library(ada)
+library(MASS)
+library(mice)
+library(Hmisc)
+library(corrplot)
+library(naniar)
+library(sqldf)
+library(caret)
+```
+
+
+```{r}
+trainingv2 = read.csv("training_v2.csv") %>%
+  mutate(hospital_death = as.factor(hospital_death))
+
+unlabeled = read.csv("unlabeled.csv")
+
+full = rbind(trainingv2, unlabeled)
+
+completedData = read.csv("imputed_missing.csv")
+
+d1_imputed_data = read.csv("d1_imputed_missing.csv")
+```
+
+
+###missing values
+
+```{r}
+
+missing_values <- full %>% summarize_all(funs(sum(is.na(.))/n()))
+
+missing_values <- gather(missing_values, key="feature", value="missing_pct")
+
+##getting rid of columns with more than 70% missing
+full = full[, -which(colMeans(is.na(full)) > 0.7)] 
+
+
+###imputed data using mice
+
+full$bmi = completedData$bmi
+
+full$weight = completedData$weight
+
+full$height = completedData$height
+
+full$age = completedData$age
+
+full$creatinine_apache = completedData$creatinine_apache
+
+full$map_apache = completedData$map_apache
+
+full$bun_apache = completedData$bun_apache
+
+full$apache_2_diagnosis = completedData$apache_2_diagnosis
+
+full$apache_3j_diagnosis = completedData$apache_3j_diagnosis
+
+full$glucose_apache = completedData$glucose_apache
+
+full$sodium_apache = completedData$sodium_apache
+
+full$hematocrit_apache = completedData$hematocrit_apache
+
+full$heart_rate_apache = completedData$heart_rate_apache
+
+full$wbc_apache = completedData$wbc_apache
+
+full$resprate_apache = completedData$resprate_apache
+
+full$temp_apache = completedData$temp_apache
+
+
+###d1 values imputing
+
+full$d1_heartrate_min = d1_imputed_data$d1_heartrate_min
+
+full$d1_sysbp_min =  d1_imputed_data$d1_sysbp_min
+
+full$d1_temp_max = d1_imputed_data$d1_temp_max
+
+full$d1_bun_min = d1_imputed_data$d1_bun_min
+
+full$d1_hco3_min = d1_imputed_data$d1_hco3_min
+
+full$d1_sodium_min = d1_imputed_data$d1_sodium_min
+
+full$d1_wbc_min = d1_imputed_data$d1_wbc_min
+
+
+
+##imputing categorical variables
+
+
+full = full %>%
+  mutate(gcs_eyes_apache = ifelse(gcs_unable_apache == 1 & is.na(gcs_eyes_apache), 1, gcs_eyes_apache),
+         gcs_motor_apache = ifelse(gcs_unable_apache == 1 & is.na(gcs_motor_apache), 1, gcs_motor_apache),
+         gcs_verbal_apache = ifelse(gcs_unable_apache == 1 & is.na(gcs_verbal_apache), 1, gcs_verbal_apache))
+
+full = full %>%
+  mutate(arf_apache = ifelse(is.na(arf_apache), 0, arf_apache),
+         gcs_eyes_apache = ifelse(is.na(gcs_eyes_apache), 4, gcs_eyes_apache),
+         gcs_motor_apache = ifelse(is.na(gcs_motor_apache), 6, gcs_motor_apache),
+         gcs_unable_apache = ifelse(is.na(gcs_unable_apache), 0, gcs_unable_apache),
+         gcs_verbal_apache = ifelse(is.na(gcs_verbal_apache), 5, gcs_verbal_apache),
+         intubated_apache = ifelse(is.na(intubated_apache), 0, intubated_apache),
+         ventilated_apache = ifelse(is.na(ventilated_apache), 0, ventilated_apache),
+         apache_4a_hospital_death_prob = ifelse(is.na(apache_4a_hospital_death_prob), 0.02, apache_4a_hospital_death_prob),
+         aids = ifelse(is.na(aids), 0, aids),
+         cirrhosis = ifelse(is.na(cirrhosis), 0, cirrhosis),
+         diabetes_mellitus = ifelse(is.na(diabetes_mellitus), 0, diabetes_mellitus),
+         hepatic_failure = ifelse(is.na(hepatic_failure), 0, hepatic_failure),
+         immunosuppression = ifelse(is.na(immunosuppression), 0, immunosuppression),
+         leukemia = ifelse(is.na(leukemia), 0, leukemia),
+         lymphoma = ifelse(is.na(lymphoma), 0, lymphoma),
+         solid_tumor_with_metastasis = ifelse(is.na(solid_tumor_with_metastasis), 0, solid_tumor_with_metastasis),
+         apache_4a_icu_death_prob = ifelse(is.na(apache_4a_icu_death_prob), 0.02, apache_4a_icu_death_prob))
+
+
+##median imputation for the rest of the variables
+
+for(i in 38:119){
+  full[is.na(full[,i]), i] <- median(full[,i], na.rm = TRUE)
+}
+
+
+```
+
+##feature engineering
+
+```{r}
+full$gcs_total = full$gcs_eyes_apache + full$gcs_motor_apache + full$gcs_verbal_apache
+
+
+full = full %>%
+  dplyr::select(-c(albumin_apache, bilirubin_apache, readmission_status, gcs_eyes_apache, gcs_motor_apache, gcs_verbal_apache))
+
+
+full = full %>%
+  mutate(cancer = as.numeric(leukemia) + as.numeric(lymphoma) + as.numeric(solid_tumor_with_metastasis),
+         liver_disease = as.numeric(hepatic_failure) + as.numeric(cirrhosis),
+         other = as.numeric(immunosuppression) + as.numeric(diabetes_mellitus)) %>%
+  dplyr::select(-c(leukemia, lymphoma, solid_tumor_with_metastasis, hepatic_failure, cirrhosis, immunosuppression, diabetes_mellitus))
+
+
+full = full %>%
+  mutate(aids = as.factor(aids),
+          elective_surgery = as.factor(elective_surgery),
+          cancer = as.factor(cancer),
+          other = as.factor(other),
+          liver_disease = as.factor(liver_disease),
+          apache_post_operative = as.factor(apache_post_operative),
+          arf_apache = as.factor(arf_apache),
+          ventilated_apache = as.factor(ventilated_apache),
+          intubated_apache = as.factor(intubated_apache),
+          gcs_unable_apache = as.factor(gcs_unable_apache))
+
+```
+
+
+```{r}
+full$icu_admit_source = as.character(full$icu_admit_source)
+
+full$icu_admit_source[full$icu_admit_source %in% c("", "Other Hospital", "Other ICU")] = "Other"
+
+full$icu_admit_source = as.factor(full$icu_admit_source)
+
+
+full$icu_type = as.character(full$icu_type)
+
+full$icu_type[full$icu_type %in% c("CCU-CTICU", "CSICU", "CTICU", "SICU")] = "CCSTICU"
+
+full$icu_type = as.factor(full$icu_type)
+
+full$apache_2_bodysystem = as.character(full$apache_2_bodysystem)
+
+full$apache_2_bodysystem[full$apache_2_bodysystem %in% c("","Undefined diagnoses")] = "Undefined Diagnoses"
+
+
+full$apache_2_bodysystem = as.factor(full$apache_2_bodysystem)
+
+full = full %>%
+  dplyr::select(-c(patient_id))
+
+```
+
+
+```{r}
+ggplot(full, aes(x=log(bmi))) + geom_histogram()
+
+full = full %>%
+  mutate(bmi = log(bmi),
+         glucose_apache = log(glucose_apache),
+         wbc_apache = log(wbc_apache),
+         d1_platelets_max = log(d1_platelets_max),
+         d1_potassium_max = log(d1_potassium_max))
+```
+
+
+```{r}
+numericVars <- which(sapply(full, is.numeric)) #index vector numeric variables
+factorVars <- which(sapply(full, is.factor))
+```
+
+```{r}
+all_numVar <- full[, numericVars]
+cor_numVar <- cor(all_numVar, method ="pearson") #correlations of all numeric variables
+corrplot(cor_numVar, method = "color", tl.cex = 0.5)
+
+
+hc = findCorrelation(cor_numVar, cutoff=0.9) # putt any value as a "cutoff" 
+hc = sort(hc)
+full = full[,-c(hc)]
+print(full)
+```
+
+```{r}
+##bar plots for blog
+
+ggplot(full, aes(x=icu_type, y=hospital_death, fill = icu_type)) + 
+  geom_bar(stat = "identity") +
+  labs(y="Hospital Death", x = "ICU Type") 
+
+ggplot(full, aes(x=apache_2_bodysystem, y=hospital_death, fill = apache_2_bodysystem)) + 
+  geom_bar(stat = "identity") +
+labs(y="Hospital Death", x = "APACHE 2 bodysystem") 
+
+
+```
+
+
+```{r}
+train <- full[1:91713,]
+test <- full[91714:131021,]
+
+
+write.csv(train, "train.csv")
+write.csv(test, "test.csv")
+```
+
+
